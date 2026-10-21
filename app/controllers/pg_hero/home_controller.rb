@@ -36,8 +36,7 @@ module PgHero
         @inactive_replication_slots = @database.replication_slots.select { |r| !r[:active] }
       end
 
-      @walsender_queries, long_running_queries = @database.long_running_queries.partition { |q| q[:backend_type] == "walsender" }
-      @autovacuum_queries, @long_running_queries = long_running_queries.partition { |q| q[:query].starts_with?("autovacuum:") }
+      @autovacuum_queries, @long_running_queries = @database.long_running_queries.partition { |q| q[:backend_type] == "autovacuum worker" }
 
       connection_states = @database.connection_states
       @total_connections = connection_states.values.sum
@@ -416,21 +415,27 @@ module PgHero
     end
 
     def kill
-      if @database.kill(params[:pid])
+      if @database.kill(params[:pid], key: params[:key].to_i)
         redirect_backward notice: "Query killed"
       else
         redirect_backward notice: "Query no longer running"
       end
+    rescue ActiveRecord::StatementInvalid
+      redirect_backward alert: "The database user does not have permission to kill this query"
     end
 
     def kill_long_running_queries
       @database.kill_long_running_queries
       redirect_backward notice: "Queries killed"
+    rescue ActiveRecord::StatementInvalid
+      redirect_backward alert: "The database user does not have permission to kill some queries"
     end
 
     def kill_all
       @database.kill_all
       redirect_backward notice: "Connections killed"
+    rescue ActiveRecord::StatementInvalid
+      redirect_backward alert: "The database user does not have permission to kill some connections"
     end
 
     def enable_query_stats

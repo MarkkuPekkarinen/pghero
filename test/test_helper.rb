@@ -37,7 +37,7 @@ class Minitest::Test
     previous_value = PgHero.filter_data
     begin
       PgHero.filter_data = true
-      database.remove_instance_variable(:@filter_data)
+      database.remove_instance_variable(:@filter_data) if database.instance_variable_defined?(:@filter_data)
       yield
     ensure
       PgHero.filter_data = previous_value
@@ -46,17 +46,35 @@ class Minitest::Test
   end
 
   def with_running_query(query)
-    # TODO manually checkout connection if needed
-    t = Thread.new { ActiveRecord::Base.connection.execute(query) }
+    stopping = false
+    t =
+      Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do |connection|
+          begin
+            connection.execute(query)
+          rescue ActiveRecord::QueryCanceled => e
+            raise e unless stopping
+          end
+        end
+      end
+    t.report_on_exception = false
     # TODO ensure query started
     sleep(0.05)
     yield
-    # TODO cancel query instead of waiting
+    stopping = true
+    database.send(:execute, "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query = ?", [query])
     t.join
   end
 
   def explain_normalized?
     database.server_version_num >= 160000
+  end
+
+  def assert_kills
+    error = assert_raises(ActiveRecord::ConnectionFailed) do
+      yield
+    end
+    assert_match "terminating connection due to administrator command", error.message
   end
 end
 

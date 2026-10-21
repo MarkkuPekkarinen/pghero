@@ -4,7 +4,7 @@ class ControllerTest < ActionDispatch::IntegrationTest
   def test_index
     get pg_hero.root_path
     assert_response :success
-    assert_match "long running queries", response.body
+    assert_match "No long running queries", response.body
     refute_match "hit rate", response.body
   end
 
@@ -13,6 +13,30 @@ class ControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match "hit rate", response.body
     assert_match "unused indexes", response.body
+  end
+
+  def test_index_long_running_queries
+    with_config({"long_running_query_sec" => 0}) do
+      with_running_query("SELECT pg_sleep(1)") do
+        get pg_hero.root_path
+        assert_response :success
+        assert_match "1 long running query", response.body
+        assert_match "Kill</button>", response.body
+        assert_match "Kill All</button>", response.body
+      end
+    end
+  end
+
+  def test_index_long_running_queries_disable_kill
+    with_config({"long_running_query_sec" => 0, "disable_kill" => true}) do
+      with_running_query("SELECT pg_sleep(1)") do
+        get pg_hero.root_path
+        assert_response :success
+        assert_match "1 long running query", response.body
+        refute_match "Kill All</button>", response.body
+        refute_match "Kill</button>", response.body
+      end
+    end
   end
 
   def test_index_connections
@@ -49,8 +73,51 @@ class ControllerTest < ActionDispatch::IntegrationTest
   end
 
   def test_live_queries
-    get pg_hero.live_queries_path
-    assert_response :success
+    with_running_query("SELECT pg_sleep(1)") do
+      get pg_hero.live_queries_path
+      assert_response :success
+      assert_match "SELECT pg_sleep(1)", response.body
+      assert_match "Explain</button>", response.body
+      assert_match "Kill</button>", response.body
+    end
+  end
+
+  def test_live_queries_filter_data
+    with_filter_data do
+      with_running_query("SELECT pg_sleep(1)") do
+        get pg_hero.live_queries_path
+        assert_response :success
+        assert_match "SELECT pg_sleep($1)", response.body
+        refute_match "SELECT pg_sleep(1)", response.body
+        if database.server_version_num >= 160000
+          assert_match "Explain</button>", response.body
+        else
+          refute_match "Explain</button>", response.body
+        end
+      end
+    end
+  end
+
+  def test_live_queries_disable_kill
+    with_disable_kill do
+      with_running_query("SELECT pg_sleep(1)") do
+        get pg_hero.live_queries_path
+        assert_response :success
+        assert_match "SELECT pg_sleep(1)", response.body
+        refute_match "Kill</button>", response.body
+      end
+    end
+  end
+
+  def test_live_queries_explain_false
+    with_explain(false) do
+      with_running_query("SELECT pg_sleep(1)") do
+        get pg_hero.live_queries_path
+        assert_response :success
+        assert_match "SELECT pg_sleep(1)", response.body
+        refute_match "Explain</button>", response.body
+      end
+    end
   end
 
   def test_queries
@@ -249,11 +316,34 @@ class ControllerTest < ActionDispatch::IntegrationTest
     assert_match "Dead Rows", response.body
   end
 
-  # prevent warning for now
-  # def test_kill
-  #   post pg_hero.kill_path(pid: 1_000_000_000)
-  #   assert_redirected_to "/"
-  # end
+  def test_kill
+    assert_kills do
+      with_running_query("SELECT pg_sleep(1)") do
+        query = database.running_queries.find { |v| v[:query] == "SELECT pg_sleep(1)" }
+        post pg_hero.kill_path(pid: query[:pid], key: query[:started_at].usec)
+        assert_redirected_to "/"
+        assert_equal "Query killed", flash[:notice]
+      end
+    end
+  end
+
+  def test_kill_invalid_key
+    with_running_query("SELECT pg_sleep(1)") do
+      query = database.running_queries.find { |v| v[:query] == "SELECT pg_sleep(1)" }
+      post pg_hero.kill_path(pid: query[:pid], key: query[:started_at].usec - 1)
+      assert_redirected_to "/"
+      assert_equal "Query no longer running", flash[:notice]
+    end
+  end
+
+  def test_kill_missing_key
+    with_running_query("SELECT pg_sleep(1)") do
+      query = database.running_queries.find { |v| v[:query] == "SELECT pg_sleep(1)" }
+      post pg_hero.kill_path(pid: query[:pid])
+      assert_redirected_to "/"
+      assert_equal "Query no longer running", flash[:notice]
+    end
+  end
 
   def test_kill_not_enabled
     with_disable_kill do
@@ -266,6 +356,17 @@ class ControllerTest < ActionDispatch::IntegrationTest
   def test_kill_long_running_queries
     post pg_hero.kill_long_running_queries_path
     assert_redirected_to "/"
+    assert_equal "Queries killed", flash[:notice]
+
+    with_config({"long_running_query_sec" => 0}) do
+      assert_kills do
+        with_running_query("SELECT pg_sleep(1)") do
+          post pg_hero.kill_long_running_queries_path
+          assert_redirected_to "/"
+          assert_equal "Queries killed", flash[:notice]
+        end
+      end
+    end
   end
 
   def test_kill_long_running_queries_not_enabled
